@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""
-GRU Model Training for KubeRay Task Prediction
-
-This script trains a Gated Recurrent Unit (GRU) model to predict
-future task demand (ray_tasks metric) for proactive autoscaling.
-
-Based on research showing GRU achieves:
-- MSE: 0.00194 (better than LSTM: 0.00195, ARIMA: 0.00197)
-- Training time: 0.75s (faster than LSTM: 1.44s)
-"""
+"""GRU model training for KubeRay task prediction."""
 
 import os
 import json
@@ -16,219 +7,249 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Tuple, Optional
+import subprocess
+import requests
+from urllib.parse import urlencode
 
-# Configuration
-SEQUENCE_LENGTH = 60       # 60 data points (e.g., 60 seconds of history)
-PREDICTION_HORIZON = 30    # Predict 30 steps ahead
-HIDDEN_UNITS = 64
+# Config
+SEQ_LEN = 60
+PRED_HORIZON = 30
+HIDDEN = 64
 EPOCHS = 100
-BATCH_SIZE = 32
-VALIDATION_SPLIT = 0.2
+BATCH = 32
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "gru_model.h5")
 SCALER_PATH = os.path.join(os.path.dirname(__file__), "scaler_params.json")
+DATA_PATH = os.path.join(os.path.dirname(__file__), "training_data.json")
 
 
-def generate_synthetic_training_data(num_samples: int = 10000):
-    """
-    Generate synthetic training data simulating bursty Ray workloads.
+def get_oc_token():
+    r = subprocess.run(["oc", "whoami", "-t"], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError("oc login required")
+    return r.stdout.strip()
+
+
+def get_prom_url():
+    for route in ["prometheus-k8s", "thanos-querier"]:
+        r = subprocess.run(
+            ["oc", "get", "route", "-n", "openshift-monitoring", route, "-o", "jsonpath={.spec.host}"],
+            capture_output=True, text=True
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return f"https://{r.stdout.strip()}"
+    raise RuntimeError("No prometheus route found")
+
+
+def query_prom(query, start, end, step="1m", url=None, token=None):
+    url = url or get_prom_url()
+    token = token or get_oc_token()
     
-    In production, this would be replaced with historical Prometheus data
-    from actual ray_tasks{State="PENDING_ARGS_AVAIL"} metric.
-    """
+    params = {"query": query, "start": start.isoformat()+"Z", "end": end.isoformat()+"Z", "step": step}
+    resp = requests.get(f"{url}/api/v1/query_range?{urlencode(params)}",
+                        headers={"Authorization": f"Bearer {token}"}, verify=False, timeout=60)
+    
+    data = resp.json()
+    if data["status"] != "success":
+        return np.array([])
+    
+    vals = []
+    for r in data.get("data", {}).get("result", []):
+        for _, v in r.get("values", []):
+            vals.append(float(v))
+    return np.array(vals, dtype=np.float32)
+
+
+def load_prom_data(hours=24, ns=None):
+    end = datetime.utcnow()
+    start = end - timedelta(hours=hours)
+    
+    # try ray_scheduler_tasks first, then fallbacks
+    queries = [
+        f'sum(ray_scheduler_tasks{{State="PENDING"{f", namespace={ns}" if ns else ""}}})',
+        'sum(ray_resources{Name="CPU",State="USED"})',
+        'avg(ray_node_cpu_utilization)'
+    ]
+    
+    for q in queries:
+        data = query_prom(q, start, end)
+        if len(data) > 0:
+            return data
+    return np.array([])
+
+
+def load_saved():
+    if os.path.exists(DATA_PATH):
+        with open(DATA_PATH) as f:
+            d = json.load(f)
+        return np.array(d['data'], dtype=np.float32)
+    return None
+
+
+def gen_burst(base=5, height=100):
+    d = []
+    d.extend(np.random.poisson(base, np.random.randint(50,100)))
+    
+    ramp = np.random.randint(10,30)
+    d.extend(np.linspace(base, height, ramp).astype(int).clip(0))
+    d.extend(np.random.poisson(height, np.random.randint(30,100)))
+    d.extend(np.linspace(height, base*2, np.random.randint(20,50)).astype(int).clip(0))
+    d.extend(np.random.poisson(base*2, np.random.randint(30,70)))
+    return np.array(d, dtype=np.float32)
+
+
+def gen_multi_burst(n=3):
+    d = np.random.poisson(5, 500).astype(np.float32)
+    for _ in range(n):
+        s = np.random.randint(0, 400)
+        h = np.random.randint(30, 150)
+        l = np.random.randint(50, 100)
+        d[s:s+l] += np.random.poisson(h, l)
+    return d
+
+
+def gen_periodic(period=100, amp=50):
+    t = np.arange(500)
+    return (amp*(1+np.sin(2*np.pi*t/period))/2 + np.random.poisson(10,500)).astype(np.float32)
+
+
+def gen_spiky(n=5):
+    d = np.random.poisson(5, 300).astype(np.float32)
+    for _ in range(n):
+        p = np.random.randint(10,290)
+        d[p:p+np.random.randint(3,10)] += np.random.randint(50,200)
+    return d
+
+
+def gen_synthetic(n=10000):
     np.random.seed(42)
-    
-    # Generate multiple burst patterns
-    data = []
-    
-    for _ in range(num_samples // 500):
-        # Baseline period (low demand)
-        baseline = np.random.poisson(5, 100)
-        data.extend(baseline)
-        
-        # Burst ramp-up (sudden spike)
-        burst_height = np.random.randint(50, 200)
-        ramp_up = np.linspace(5, burst_height, 20) + np.random.randn(20) * 5
-        data.extend(ramp_up.astype(int).clip(0))
-        
-        # Burst peak (sustained high demand)
-        peak_duration = np.random.randint(50, 150)
-        peak = np.random.poisson(burst_height, peak_duration)
-        data.extend(peak)
-        
-        # Burst ramp-down (gradual decrease)
-        ramp_down = np.linspace(burst_height, 10, 30) + np.random.randn(30) * 5
-        data.extend(ramp_down.astype(int).clip(0))
-        
-        # Recovery period
-        recovery = np.random.poisson(10, 50)
-        data.extend(recovery)
-    
-    return np.array(data, dtype=np.float32)
+    d = []
+    for i in range(n//400):
+        t = i % 4
+        if t == 0: d.extend(gen_burst(height=np.random.randint(50,200)))
+        elif t == 1: d.extend(gen_multi_burst(np.random.randint(2,5)))
+        elif t == 2: d.extend(gen_periodic(np.random.randint(50,150), np.random.randint(30,100)))
+        else: d.extend(gen_spiky(np.random.randint(3,8)))
+    return np.array(d, dtype=np.float32)
 
 
-def create_sequences(data: np.ndarray, seq_length: int, pred_horizon: int):
-    """
-    Create input sequences (X) and prediction targets (y).
+def validate(data):
+    stats = {
+        "count": len(data), "mean": float(np.mean(data)), "std": float(np.std(data)),
+        "min": float(np.min(data)), "max": float(np.max(data))
+    }
     
-    X: Historical sequence of length seq_length
-    y: Future value at pred_horizon steps ahead
-    """
+    ok = True
+    if np.isnan(data).sum() > 0 or np.isinf(data).sum() > 0:
+        ok = False
+    if len(data) < SEQ_LEN + PRED_HORIZON + 1000:
+        ok = False
+    
+    return {"valid": ok, "stats": stats}
+
+
+def make_sequences(data, seq_len, horizon):
     X, y = [], []
-    
-    for i in range(len(data) - seq_length - pred_horizon):
-        X.append(data[i:i + seq_length])
-        y.append(data[i + seq_length + pred_horizon - 1])
-    
+    for i in range(len(data) - seq_len - horizon):
+        X.append(data[i:i+seq_len])
+        y.append(data[i+seq_len+horizon-1])
     return np.array(X), np.array(y)
 
 
-def build_gru_model(input_shape: tuple) -> keras.Model:
-    """
-    Build the GRU model architecture.
-    
-    Architecture:
-    - Input Layer
-    - GRU Layer (captures temporal dependencies)
-    - Dense Layer (prediction output)
-    """
-    model = keras.Sequential([
-        layers.Input(shape=input_shape),
-        layers.GRU(HIDDEN_UNITS, return_sequences=True),
+def build_model(shape):
+    m = keras.Sequential([
+        layers.Input(shape=shape),
+        layers.GRU(HIDDEN, return_sequences=True),
         layers.Dropout(0.2),
-        layers.GRU(HIDDEN_UNITS // 2),
+        layers.GRU(HIDDEN//2),
         layers.Dropout(0.2),
         layers.Dense(32, activation='relu'),
         layers.Dense(1)
     ])
+    m.compile(optimizer='adam', loss='mse', metrics=['mae'])
+    return m
+
+
+def train(use_prom=False, hours=24, ns=None, use_saved=False):
+    print("=" * 50)
+    print("GRU Training")
+    print("=" * 50)
     
-    model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=0.001),
-        loss='mse',
-        metrics=['mae']
-    )
+    data = None
+    if use_saved:
+        data = load_saved()
+    if use_prom and data is None:
+        data = load_prom_data(hours, ns)
+    
+    # fallback to synthetic
+    if data is None or len(data) < 1000:
+        synth = gen_synthetic()
+        if data is not None and len(data) > 0:
+            data = np.concatenate([synth, data])
+        else:
+            data = synth
+    
+    print(f"Data points: {len(data)}")
+    
+    check = validate(data)
+    if not check["valid"]:
+        print("Data validation failed")
+        return None
+    
+    # normalize
+    mu, sig = data.mean(), data.std()
+    norm = (data - mu) / sig
+    with open(SCALER_PATH, 'w') as f:
+        json.dump({"mean": float(mu), "std": float(sig)}, f)
+    
+    X, y = make_sequences(norm, SEQ_LEN, PRED_HORIZON)
+    X = X.reshape((X.shape[0], X.shape[1], 1))
+    
+    split = int(len(X) * 0.8)
+    X_tr, X_val = X[:split], X[split:]
+    y_tr, y_val = y[:split], y[split:]
+    
+    print(f"Train: {len(X_tr)}, Val: {len(X_val)}")
+    
+    model = build_model((SEQ_LEN, 1))
+    model.summary()
+    
+    cbs = [
+        keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True),
+        keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5)
+    ]
+    
+    model.fit(X_tr, y_tr, epochs=EPOCHS, batch_size=BATCH, validation_data=(X_val, y_val), callbacks=cbs)
+    
+    loss, mae = model.evaluate(X_val, y_val, verbose=0)
+    print(f"Val MSE: {loss:.4f}, MAE: {mae:.4f}")
+    
+    model.save(MODEL_PATH)
+    print(f"Saved to {MODEL_PATH}")
     
     return model
 
 
-def train_model():
-    """Train the GRU model and save it."""
-    print("=" * 60)
-    print("GRU Model Training for KubeRay Task Prediction")
-    print("=" * 60)
-    
-    # Generate training data
-    print("\n1. Generating synthetic training data...")
-    raw_data = generate_synthetic_training_data()
-    print(f"   Generated {len(raw_data)} data points")
-    
-    # Normalize data
-    print("\n2. Normalizing data...")
-    data_mean = raw_data.mean()
-    data_std = raw_data.std()
-    normalized_data = (raw_data - data_mean) / data_std
-    print(f"   Mean: {data_mean:.2f}, Std: {data_std:.2f}")
-    
-    # Save scaler parameters
-    scaler_params = {"mean": float(data_mean), "std": float(data_std)}
-    with open(SCALER_PATH, 'w') as f:
-        json.dump(scaler_params, f)
-    print(f"   Saved scaler parameters to {SCALER_PATH}")
-    
-    # Create sequences
-    print("\n3. Creating training sequences...")
-    X, y = create_sequences(normalized_data, SEQUENCE_LENGTH, PREDICTION_HORIZON)
-    print(f"   X shape: {X.shape}, y shape: {y.shape}")
-    
-    # Reshape for GRU (samples, timesteps, features)
-    X = X.reshape((X.shape[0], X.shape[1], 1))
-    
-    # Split data
-    split_idx = int(len(X) * (1 - VALIDATION_SPLIT))
-    X_train, X_val = X[:split_idx], X[split_idx:]
-    y_train, y_val = y[:split_idx], y[split_idx:]
-    print(f"   Training samples: {len(X_train)}, Validation samples: {len(X_val)}")
-    
-    # Build model
-    print("\n4. Building GRU model...")
-    model = build_gru_model(input_shape=(SEQUENCE_LENGTH, 1))
-    model.summary()
-    
-    # Train model
-    print("\n5. Training model...")
-    callbacks = [
-        keras.callbacks.EarlyStopping(
-            monitor='val_loss',
-            patience=10,
-            restore_best_weights=True
-        ),
-        keras.callbacks.ReduceLROnPlateau(
-            monitor='val_loss',
-            factor=0.5,
-            patience=5
-        )
-    ]
-    
-    start_time = datetime.now()
-    history = model.fit(
-        X_train, y_train,
-        epochs=EPOCHS,
-        batch_size=BATCH_SIZE,
-        validation_data=(X_val, y_val),
-        callbacks=callbacks,
-        verbose=1
-    )
-    training_time = (datetime.now() - start_time).total_seconds()
-    
-    # Evaluate model
-    print("\n6. Evaluating model...")
-    val_loss, val_mae = model.evaluate(X_val, y_val, verbose=0)
-    print(f"   Validation MSE: {val_loss:.6f}")
-    print(f"   Validation MAE: {val_mae:.6f}")
-    print(f"   Training Time: {training_time:.2f}s")
-    
-    # Save model
-    print(f"\n7. Saving model to {MODEL_PATH}...")
-    model.save(MODEL_PATH)
-    
-    print("\n" + "=" * 60)
-    print("Training Complete!")
-    print("=" * 60)
-    
-    return model, history
-
-
-def load_model() -> keras.Model:
-    """Load the pre-trained GRU model."""
+def load_model():
     return keras.models.load_model(MODEL_PATH)
 
 
-def predict(model: keras.Model, sequence: np.ndarray, scaler_params: dict) -> float:
-    """
-    Make a prediction using the trained model.
-    
-    Args:
-        model: Trained GRU model
-        sequence: Historical sequence of task counts
-        scaler_params: Normalization parameters
-    
-    Returns:
-        Predicted task count (denormalized)
-    """
-    # Normalize input
-    normalized = (sequence - scaler_params["mean"]) / scaler_params["std"]
-    
-    # Reshape for model
-    X = normalized.reshape((1, len(normalized), 1))
-    
-    # Predict
-    prediction = model.predict(X, verbose=0)[0][0]
-    
-    # Denormalize
-    return prediction * scaler_params["std"] + scaler_params["mean"]
+def predict(model, seq, scaler):
+    norm = (seq - scaler["mean"]) / scaler["std"]
+    X = norm.reshape((1, len(norm), 1))
+    pred = model.predict(X, verbose=0)[0][0]
+    return pred * scaler["std"] + scaler["mean"]
 
 
 if __name__ == "__main__":
-    train_model()
-
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--prometheus", "-p", action="store_true")
+    p.add_argument("--saved", "-s", action="store_true")
+    p.add_argument("--hours", "-H", type=int, default=24)
+    p.add_argument("--namespace", "-n", type=str, default=None)
+    args = p.parse_args()
+    
+    train(use_prom=args.prometheus, hours=args.hours, ns=args.namespace, use_saved=args.saved)
