@@ -1,0 +1,6 @@
+2025-12-06 15:53:53,210	INFO worker.py:1458 -- Using address 127.0.0.1:6379 set in the environment variable RAY_ADDRESS
+2025-12-06 15:53:53,211	INFO worker.py:1598 -- Connecting to existing Ray cluster at address: 10.130.20.33:6379...
+2025-12-06 15:53:53,230	INFO worker.py:1774 -- Connected to Ray cluster. View the dashboard at [1m[32mhttp://10.130.20.33:8265 [39m[22m
+Resources: {'CPU': 12.0, 'object_store_memory': 8509388387.0, 'node:10.130.20.34': 1.0, 'memory': 30064771072.0, 'GPU': 7.0, 'accelerator_type:V100': 7.0, 'node:10.130.20.35': 1.0, 'node:10.131.20.31': 1.0, 'node:10.131.20.33': 1.0, 'node:10.130.20.33': 1.0, 'node:__internal_head__': 1.0, 'node:10.131.20.32': 1.0, 'node:10.131.20.30': 1.0}
+RESULT: 5.53s for 20 tasks
+METRICS:{"time": 5.527628660202026, "tasks": 20, "workers": 6}

@@ -1,0 +1,43 @@
+{
+  "experiments": {
+    "reactive-1w": {
+      "time": 21.714703798294067,
+      "tasks": 20,
+      "workers": 1,
+      "cpus": 2
+    },
+    "reactive-2w": {
+      "time": 11.744661331176758,
+      "tasks": 20,
+      "workers": 2,
+      "cpus": 4
+    },
+    "proactive-4w": {
+      "time": 7.395198822021484,
+      "tasks": 20,
+      "workers": 4,
+      "cpus": 8
+    },
+    "proactive-6w": {
+      "time": 5.527628660202026,
+      "tasks": 20,
+      "workers": 6,
+      "cpus": 12
+    }
+  },
+  "baseline": "reactive-1w",
+  "metrics": {
+    "speedups": {
+      "reactive-1w": 1.0,
+      "reactive-2w": 1.8488999542840252,
+      "proactive-4w": 2.9363245425710316,
+      "proactive-6w": 3.928394096845939
+    },
+    "efficiencies": {
+      "reactive-1w": 1.0,
+      "reactive-2w": 0.9244499771420126,
+      "proactive-4w": 0.7340811356427579,
+      "proactive-6w": 0.6547323494743232
+    }
+  }
+}
