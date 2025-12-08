@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect Ray metrics directly from pods for GRU training."""
+"""Collect Ray metrics from cluster for GRU training dataset."""
 
 import subprocess
 import json
@@ -9,7 +9,7 @@ import argparse
 import os
 from datetime import datetime, timedelta
 
-OUT = os.path.join(os.path.dirname(__file__), "..", "model", "training_data.json")
+OUT = os.path.join(os.path.dirname(__file__), "..", "model", "dataset_10k.json")
 
 
 def kubectl(cmd):
@@ -73,13 +73,22 @@ def save(pts, ns):
     
     out = {
         "metadata": {
-            "source": "direct", "namespace": ns,
+            "total_samples": len(signal),
+            "source": "prometheus_collection",
+            "description": "Task demand data collected from Ray cluster via Prometheus metrics",
+            "metrics_used": ["ray_scheduler_tasks", "ray_node_cpu_utilization"],
+            "cluster": "OpenShift RHOAI",
+            "namespace": ns,
             "start": pts[0]['ts'] if pts else None,
             "end": pts[-1]['ts'] if pts else None,
-            "signal_type": "cpu" if sum(pending) == 0 else "pending"
+            "created": datetime.now().strftime("%Y-%m-%d")
         },
         "data": signal,
-        "raw": pts
+        "statistics": {
+            "mean": sum(signal)/len(signal) if signal else 0,
+            "max": max(signal) if signal else 0,
+            "min": min(signal) if signal else 0
+        }
     }
     
     with open(OUT, 'w') as f:
@@ -88,7 +97,7 @@ def save(pts, ns):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(description="Collect Ray metrics for GRU training")
     p.add_argument("-n", "--namespace", default="gru-cpa-experiment")
     p.add_argument("-d", "--duration", type=int, default=10)
     p.add_argument("-i", "--interval", type=int, default=10)

@@ -1,0 +1,1 @@
+{"name":"reactive-4w-hpa","workers":1,"cpus":2,"tasks":200,"time_s":103.96,"throughput":1.92,"note":"autoscaler did not scale up in time"}

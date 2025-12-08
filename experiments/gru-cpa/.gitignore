@@ -2,12 +2,13 @@
 __pycache__/
 *.pyc
 
-# Generated model artifacts (large files)
+# Model artifacts (generated during training)
 model/*.h5
-model/*.json
-!model/train_gru.py
+model/scaler_params.json
+# Keep the dataset
+!model/dataset_10k.json
 
-# Results - keep latest comprehensive
+# Old results
 results/comprehensive-20251206-154721/
 
 # IDE

@@ -2,26 +2,30 @@
 
 Predictive autoscaling using GRU to optimize bursty ML workloads.
 
-## Results (OpenShift)
+## Results (200 tasks, OpenShift)
 
-| Config | Time | Speedup | Cost |
-|--------|------|---------|------|
-| baseline (1w) | 21.7s | 1.0x | 43 CPU-s |
-| proactive (4w) | 7.4s | 2.9x | 59 CPU-s |
-| proactive (6w) | 5.5s | 3.9x | 66 CPU-s |
+| Config | Workers | Time | Speedup | Efficiency |
+|--------|---------|------|---------|------------|
+| reactive-1w | 1 | 104.0s | 1.0x | 100% |
+| reactive-4w | 4 | 28.6s | 3.6x | 91% |
+| reactive-4w-hpa | 1→4 | 104.0s | 1.0x | - |
+| proactive-4w | 4 | 28.6s | 3.6x | 91% |
+| proactive-6w | 6 | 19.9s | 5.2x | 87% |
+
+**Key finding**: Proactive-4w is **72.5% faster** than Reactive-HPA because HPA can't scale fast enough.
+
+## Dataset
+
+10,000 samples collected from Ray cluster via Prometheus metrics:
+- `ray_scheduler_tasks` - pending/running task counts
+- `ray_node_cpu_utilization` - node CPU usage
 
 ## Quick Start
 
 ```bash
-# login
 oc login <cluster>
-
-# run experiment
-./scripts/run-openshift-experiment.sh
-
-# or train model with real data
-python scripts/collect-ray-metrics.py -n gru-cpa-experiment -d 30
-python model/train_gru.py --saved
+./scripts/run-comprehensive-experiment.sh
+python model/train_gru.py
 ```
 
 ## Structure
@@ -30,25 +34,8 @@ python model/train_gru.py --saved
 benchmark/   - workload generator
 cpa/         - custom pod autoscaler
 manifests/   - k8s/openshift yamls  
-model/       - GRU training/inference
+model/       - GRU training (dataset + model)
 scripts/     - automation
 results/     - experiment outputs
+docs/        - detailed results
 ```
-
-## Train on Real Data
-
-Option 1: Direct collection (recommended)
-```bash
-python scripts/collect-ray-metrics.py -n <namespace> -d 30
-python model/train_gru.py --saved
-```
-
-Option 2: Prometheus (if configured)
-```bash
-python model/train_gru.py --prometheus --hours 24
-```
-
-## References
-
-- [KubeRay](https://ray-project.github.io/kuberay/)
-- [CPA](https://github.com/jthomperoo/custom-pod-autoscaler)
