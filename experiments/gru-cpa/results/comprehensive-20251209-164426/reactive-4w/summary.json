@@ -1,0 +1,9 @@
+{
+  "name": "reactive-4w",
+  "workers": 4,
+  "cpus": 8,
+  "tasks": 200,
+  "time_s": 29.09,
+  "cpu_seconds": 232.72,
+  "throughput": 6.88
+}

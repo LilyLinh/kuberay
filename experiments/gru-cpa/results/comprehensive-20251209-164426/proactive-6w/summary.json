@@ -1,0 +1,9 @@
+{
+  "name": "proactive-6w",
+  "workers": 6,
+  "cpus": 12,
+  "tasks": 200,
+  "time_s": 19.91,
+  "cpu_seconds": 238.92,
+  "throughput": 10.04
+}

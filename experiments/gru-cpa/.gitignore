@@ -4,7 +4,9 @@ __pycache__/
 
 # Model artifacts (generated during training)
 model/*.h5
+model/*.keras
 model/scaler_params.json
+model/evaluation_metrics.json
 # Keep the dataset
 !model/dataset_10k.json
 
@@ -14,4 +16,3 @@ results/comprehensive-20251206-154721/
 # IDE
 .idea/
 .vscode/
-

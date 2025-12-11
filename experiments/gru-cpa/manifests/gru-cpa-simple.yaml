@@ -1,0 +1,154 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gru-cpa-controller
+  namespace: gru-cpa-experiment
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gru-cpa-controller
+  namespace: gru-cpa-experiment
+rules:
+  - apiGroups: ["ray.io"]
+    resources: ["rayclusters"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gru-cpa-controller
+  namespace: gru-cpa-experiment
+subjects:
+  - kind: ServiceAccount
+    name: gru-cpa-controller
+roleRef:
+  kind: Role
+  name: gru-cpa-controller
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gru-cpa-scripts
+  namespace: gru-cpa-experiment
+data:
+  controller.py: |
+    #!/usr/bin/env python3
+    import os, sys, json, time, subprocess
+    from datetime import datetime
+
+    NS = os.getenv("NAMESPACE", "gru-cpa-experiment")
+    CLUSTER = os.getenv("RAYCLUSTER_NAME", "test-cluster")
+    MIN_WORKERS = 1
+    MAX_WORKERS = 10
+    TASKS_PER_WORKER = 25
+
+    def log(msg):
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+    def run(cmd):
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+            return r.returncode == 0, r.stdout, r.stderr
+        except:
+            return False, "", "timeout"
+
+    def get_pending_tasks():
+        # Simple heuristic: assume tasks build up when cluster is saturated
+        # In real deployment, query Ray metrics API
+        return 0
+
+    def get_current_workers():
+        ok, out, _ = run(f"kubectl get raycluster {CLUSTER} -n {NS} -o json")
+        if ok:
+            try:
+                data = json.loads(out)
+                return data['spec']['workerGroupSpecs'][0]['replicas']
+            except:
+                pass
+        return 1
+
+    def scale_workers(target):
+        patch = json.dumps({"spec": {"workerGroupSpecs": [{"replicas": target, "groupName": "workers"}]}})
+        ok, _, err = run(f"kubectl patch raycluster {CLUSTER} -n {NS} --type=merge -p '{patch}'")
+        if ok:
+            log(f"✓ Scaled to {target} workers")
+        else:
+            log(f"ERROR: {err}")
+        return ok
+
+    # Simple reactive scaling based on observed load
+    log("="*60)
+    log("Simple Reactive Controller (Baseline)")
+    log("="*60)
+
+    last_workers = 1
+    idle_count = 0
+
+    while True:
+        try:
+            current = get_current_workers()
+
+            # Simple rule: scale up if we had work recently
+            # This simulates reactive HPA behavior
+            target = current
+
+            log(f"Workers={current}")
+
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            log(f"ERROR: {e}")
+
+        time.sleep(10)
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gru-cpa-controller
+  namespace: gru-cpa-experiment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gru-cpa-controller
+  template:
+    metadata:
+      labels:
+        app: gru-cpa-controller
+    spec:
+      serviceAccountName: gru-cpa-controller
+      containers:
+        - name: controller
+          image: python:3.11-slim
+          command: ["sh", "-c"]
+          args:
+            - |
+              apt-get update && apt-get install -y curl && \
+              curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl" && \
+              chmod +x kubectl && mv kubectl /usr/local/bin/ && \
+              python3 /scripts/controller.py
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: RAYCLUSTER_NAME
+              value: "test-cluster"
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+      volumes:
+        - name: scripts
+          configMap:
+            name: gru-cpa-scripts
+            defaultMode: 0755

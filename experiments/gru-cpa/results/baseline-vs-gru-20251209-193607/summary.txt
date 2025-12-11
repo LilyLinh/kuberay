@@ -1,0 +1,4 @@
+Baseline: 131.06s
+GRU-CPA: 115.87s
+Improvement: 11.6%
+Speedup: 1.13x

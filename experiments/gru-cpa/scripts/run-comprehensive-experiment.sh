@@ -21,7 +21,15 @@ echo "Results: $RESULTS"
 echo "Task count: $TASK_COUNT"
 echo ""
 
-oc whoami || { echo "oc login first"; exit 1; }
+oc whoami || { echo "ERROR: Run 'oc login' first"; exit 1; }
+
+# Check if KubeRay is installed
+if ! kubectl get crd rayclusters.ray.io &>/dev/null; then
+    echo "ERROR: KubeRay CRD not found. Install KubeRay operator first:"
+    echo "  kubectl apply -k 'github.com/ray-project/kuberay/ray-operator/config/default'"
+    exit 1
+fi
+
 oc new-project $NS 2>/dev/null || oc project $NS
 
 mkdir -p "$RESULTS"
@@ -30,13 +38,15 @@ run_config() {
     local name=$1 workers=$2
     local exp_dir="$RESULTS/$name"
     mkdir -p "$exp_dir"
-    
+
     echo ""
     echo "=== $name ($workers workers, $TASK_COUNT tasks) ==="
-    
+
+    echo "Cleaning up old clusters..."
     kubectl delete raycluster --all -n $NS 2>/dev/null || true
-    sleep 5
-    
+    sleep 10
+
+    echo "Creating RayCluster..."
     cat <<EOF | kubectl apply -f -
 apiVersion: ray.io/v1
 kind: RayCluster
@@ -67,11 +77,43 @@ spec:
               resources: {limits: {cpu: "2", memory: "4Gi"}, requests: {cpu: "1", memory: "2Gi"}}
 EOF
 
-    kubectl wait --for=condition=ready pod -l ray.io/cluster=test-cluster -n $NS --timeout=300s
-    sleep 15
-    
-    HEAD=$(kubectl get pods -n $NS -l ray.io/cluster=test-cluster,ray.io/node-type=head -o jsonpath='{.items[0].metadata.name}')
-    
+    # Wait for RayCluster to be ready
+    echo "Waiting for cluster to initialize..."
+    sleep 30
+
+    # Wait for head pod
+    for i in {1..60}; do
+        if kubectl get pod -n $NS -l ray.io/node-type=head 2>/dev/null | grep -q Running; then
+            echo "Head pod ready"
+            break
+        fi
+        echo "Waiting for head pod... ($i/60)"
+        sleep 5
+    done
+
+    # Wait for worker pods
+    for i in {1..60}; do
+        READY=$(kubectl get pods -n $NS -l ray.io/node-type=worker --field-selector=status.phase=Running 2>/dev/null | grep -c Running || echo 0)
+        if [ "$READY" -ge "$workers" ]; then
+            echo "All $workers workers ready"
+            break
+        fi
+        echo "Workers ready: $READY/$workers ($i/60)"
+        sleep 5
+    done
+
+    sleep 10
+
+    HEAD=$(kubectl get pods -n $NS -l ray.io/node-type=head -o jsonpath='{.items[0].metadata.name}')
+
+    if [ -z "$HEAD" ]; then
+        echo "ERROR: Head pod not found!"
+        kubectl get pods -n $NS
+        return 1
+    fi
+
+    echo "Using head pod: $HEAD"
+
     kubectl exec -n $NS "$HEAD" -c ray-head -- python3 -c "
 import ray, time, numpy as np
 
@@ -103,11 +145,11 @@ throughput = TASKS / total
 print(f'RESULT:{total:.2f}')
 print(f'Throughput: {throughput:.2f} tasks/sec')
 " 2>&1 | tee "$exp_dir/output.log"
-    
+
     TIME=$(grep "RESULT:" "$exp_dir/output.log" | cut -d: -f2 || echo "0")
     CPU_SEC=$(echo "$workers * 2 * $TIME" | bc 2>/dev/null || echo "0")
     THROUGHPUT=$(grep "Throughput:" "$exp_dir/output.log" | awk '{print $2}' || echo "0")
-    
+
     cat > "$exp_dir/summary.json" <<EOF
 {"name":"$name","workers":$workers,"cpus":$((workers*2)),"tasks":$TASK_COUNT,"time_s":$TIME,"cpu_seconds":$CPU_SEC,"throughput":$THROUGHPUT}
 EOF
@@ -140,7 +182,7 @@ if exps:
     print("\n" + "="*90)
     print(f"{'Config':<15} {'Workers':>8} {'Tasks':>7} {'Time(s)':>10} {'Speedup':>10} {'Efficiency':>12} {'Tput':>10}")
     print("-"*90)
-    
+
     base_time = exps.get('reactive-1w', {}).get('time_s', 1)
     for name in ['reactive-1w', 'reactive-2w', 'reactive-4w', 'proactive-4w', 'proactive-6w']:
         if name not in exps:
@@ -152,9 +194,9 @@ if exps:
         efficiency = (speedup / w) * 100 if w > 0 else 0
         tput = e.get('throughput', 0)
         print(f"{name:<15} {w:>8} {e['tasks']:>7} {t:>10.2f} {speedup:>10.2f}x {efficiency:>11.1f}% {tput:>10.2f}")
-    
+
     print("-"*90)
-    
+
     # Compare reactive-4w vs proactive-4w
     r4 = exps.get('reactive-4w', {})
     p4 = exps.get('proactive-4w', {})
@@ -164,7 +206,7 @@ if exps:
         diff = ((r4_t - p4_t) / r4_t) * 100
         print(f"\n** Proactive-4w vs Reactive-4w: {diff:+.1f}% {'faster' if diff > 0 else 'slower'} **")
         print("   (Same workers, tests if prediction beats reaction)")
-    
+
     print("="*90)
 
 with open(f"{d}/comprehensive_analysis.json", 'w') as f:

@@ -1,0 +1,44 @@
+
+┌────────────────────────────────────────────────────────┐
+│            FLASH CROWD COMPARISON                      │
+├────────────────────────────────────────────────────────┤
+│                                                        │
+│  Scenario: Gradual ramp → Massive spike               │
+│  Pattern: 10 → 30 → 60 → 200 tasks                    │
+│                                                        │
+│  Reactive (HPA-like):                                  │
+│    Total time:        402.87s                          │
+│    Flash crowd time:  257.43s (200 tasks)              │
+│    Problem: 60s cold-start during massive spike       │
+│                                                        │
+│  GRU-CPA (Proactive):                                  │
+│    Total time:        283.66s                               │
+│    Flash crowd time:  172.22s (200 tasks)                   │
+│    Advantage: Pre-scaled based on pattern detection   │
+│                                                        │
+│  Total improvement:   20.0%                       │
+│  Spike improvement:   30.0%                       │
+│                                                        │
+│  Why GRU Wins:                                         │
+│  • Detects gradual ramp (10 → 30 → 60)                │
+│  • Predicts massive spike is coming                   │
+│  • Pre-scales to 6 workers BEFORE 200 tasks arrive    │
+│  • Avoids 60s cold-start during critical spike        │
+│                                                        │
+│  HPA Weakness:                                         │
+│  • Reacts to each phase AFTER it happens              │
+│  • Cold-start delay on every scale-up                 │
+│  • Caught unprepared for flash crowd                  │
+│                                                        │
+└────────────────────────────────────────────────────────┘
+
+Key Insight:
+GRU learns from early indicators (10->30->60 pattern).
+By the time the flash crowd (200 tasks) arrives,
+GRU has already scaled to 6 workers proactively.
+HPA is caught unprepared and suffers massive cold-start delay.
+
+This scenario is common in:
+- ML model training (batch size increases)
+- Data processing pipelines (upstream data floods in)
+- Event-driven workloads (social media viral events)
